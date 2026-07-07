@@ -45,10 +45,10 @@
          (and (>= py @(GuiRect.y r)) (<= py (+ @(GuiRect.y r) @(GuiRect.h r))))))
 )
 
-(doc GuiDrawCommand "Batched shapes to be rendered.")
+(doc GuiDrawCommand "Batched shapes to be rendered with clipping bounds.")
 (deftype GuiDrawCommand
-  (Rect [GuiRect Color4 Float]) ;; rect, color (rgba), corner_radius
-  (Text [GuiRect Color4 String]) ;; rect, color, content_string
+  (Rect [GuiRect Color4 Float GuiRect]) ;; rect, color (rgba), corner_radius, clip_rect
+  (Text [GuiRect Color4 String GuiRect]) ;; rect, color, content_string, clip_rect
 )
 
 (doc PanelState "Internal layout state for an active panel.")
@@ -73,16 +73,23 @@
   
   draw-commands (Array GuiDrawCommand)
   active-panel (Maybe PanelState)
+  
+  id-stack (Array String)
+  input-captured Bool
+  clip-rects (Array GuiRect)
 ])
 
 (defmodule Context
   (defn create []
-    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing)))
+    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing) [] false []))
 
   (defn clear! [ctx]
     (do
       (Context.set-draw-commands! ctx [])
-      (Context.set-active-panel! ctx (Maybe.Nothing))))
+      (Context.set-active-panel! ctx (Maybe.Nothing))
+      (Context.set-id-stack! ctx [])
+      (Context.set-input-captured! ctx false)
+      (Context.set-clip-rects! ctx [])))
 )
 
 (defmodule Gui
@@ -99,10 +106,98 @@
   (sig slider (Fn [(Ref Context) (Ref String) Float Float Float String] (Maybe Float)))
   (sig generate-vertices (Fn [(Ref Context)] (Array Vertex)))
   (sig generate-vertices-flat (Fn [(Ref Context)] (Array Float)))
+  
+  (sig push-id (Fn [(Ref Context) (Ref String)] ()))
+  (sig pop-id (Fn [(Ref Context)] ()))
+  (sig get-hashed-id (Fn [(Ref Context) (Ref String)] String))
+  (sig input-captured? (Fn [(Ref Context)] Bool))
+  
+  (sig intersect-rects (Fn [(Ref GuiRect) (Ref GuiRect)] GuiRect))
+  (sig get-active-clip-rect (Fn [(Ref Context)] GuiRect))
+  (sig push-clip-rect (Fn [(Ref Context) (Ref GuiRect)] ()))
+  (sig pop-clip-rect (Fn [(Ref Context)] ()))
+  
+  (sig text-width (Fn [(Ref String) Float] Float))
+
+  ;; === TEXT METRICS ===
+  (defn text-width [text font-size]
+    ;; monospaced font character width estimation (0.55 * font-size per char)
+    (let [len (String.length text)
+          char-w (* 0.55f font-size)]
+      (* (Float.from-int len) char-w)))
+
+  ;; === INPUT CAPTURE ===
+  (defn input-captured? [ctx]
+    @(Context.input-captured ctx))
+
+  ;; === ID HASH STACK ===
+  (defn push-id [ctx id]
+    (let [stack @(Context.id-stack ctx)
+          new-stack (Array.push-back stack @id)]
+      (Context.set-id-stack! ctx new-stack)))
+
+  (defn pop-id [ctx]
+    (let [stack @(Context.id-stack ctx)]
+      (if (empty? &stack)
+        ()
+        (let [new-stack (Array.pop-back stack)]
+          (Context.set-id-stack! ctx new-stack)))))
+
+  (defn get-hashed-id [ctx local-id]
+    (let [stack @(Context.id-stack ctx)
+          num (Array.length &stack)]
+      (if (= num 0)
+        @local-id
+        (let [path @""]
+          (do
+            (for [i 0 num]
+              (set! path (str* path @(Array.unsafe-nth &stack i) "/")))
+            (str* path @local-id))))))
+
+  ;; === CLIP RECTS ===
+  (defn intersect-rects [r1 r2]
+    (let [x1 @(GuiRect.x r1)
+          y1 @(GuiRect.y r1)
+          w1 @(GuiRect.w r1)
+          h1 @(GuiRect.h r1)
+          
+          x2 @(GuiRect.x r2)
+          y2 @(GuiRect.y r2)
+          w2 @(GuiRect.w r2)
+          h2 @(GuiRect.h r2)
+          
+          ix (max x1 x2)
+          iy (max y1 y2)
+          iw (min (+ x1 w1) (+ x2 w2))
+          ih (min (+ y1 h1) (+ y2 h2))
+          
+          final-w (max 0.0f (- iw ix))
+          final-h (max 0.0f (- ih iy))]
+      (GuiRect.init ix iy final-w final-h)))
+
+  (defn get-active-clip-rect [ctx]
+    (let [stack @(Context.clip-rects ctx)
+          num (Array.length &stack)]
+      (if (= num 0)
+        (GuiRect.init 0.0f 0.0f 99999.0f 99999.0f)
+        @(Array.unsafe-nth &stack (dec num)))))
+
+  (defn push-clip-rect [ctx rect]
+    (let [current (get-active-clip-rect ctx)
+          intersected (intersect-rects &current rect)
+          stack @(Context.clip-rects ctx)
+          new-stack (Array.push-back stack intersected)]
+      (Context.set-clip-rects! ctx new-stack)))
+
+  (defn pop-clip-rect [ctx]
+    (let [stack @(Context.clip-rects ctx)]
+      (if (empty? &stack)
+        ()
+        (let [new-stack (Array.pop-back stack)]
+          (Context.set-clip-rects! ctx new-stack)))))
 
   ;; === IMGUI LIFECYCLE ===
 
-  (doc begin "Call at the start of the frame to update mouse input and clear old draw lists.")
   (defn begin [ctx mx my down clicked]
     (do
       (Context.clear! ctx)
@@ -111,63 +206,73 @@
       (Context.set-mouse-down! ctx down)
       (Context.set-mouse-clicked! ctx clicked)))
 
-  ;; === LAYOUT HELPERS ===
-
-  (defn get-next-widget-rect! [ctx wanted-h]
+  (defn get-next-widget-rect! [ctx height]
     (match @(Context.active-panel ctx)
-      (Maybe.Just pstate)
-        (let [bx @(GuiRect.x (PanelState.bounds &pstate))
-              by @(GuiRect.y (PanelState.bounds &pstate))
-              lx @(PanelState.layout-x &pstate)
-              ly @(PanelState.layout-y &pstate)
-              lw @(PanelState.layout-w &pstate)
-              pad @(PanelState.item-padding &pstate)
-              rx (+ bx lx)
-              ry (+ by ly)
-              rect (GuiRect.init rx ry lw wanted-h)
-              new-ly (+ (+ ly wanted-h) pad)
-              new-pstate (PanelState.init @(PanelState.bounds &pstate) lx new-ly lw pad @(PanelState.row-height &pstate))]
+      (Maybe.Nothing) (GuiRect.init 0.0f 0.0f 0.0f 0.0f)
+      (Maybe.Just state)
+        (let [bounds @(PanelState.bounds &state)
+              px @(GuiRect.x &bounds)
+              py @(GuiRect.y &bounds)
+              lx @(PanelState.layout-x &state)
+              ly @(PanelState.layout-y &state)
+              w @(PanelState.layout-w &state)
+              padding @(PanelState.item-padding &state)
+              
+              ;; Move next cursor down
+              new-y (+ (+ ly height) padding)
+              new-state (PanelState.init 
+                          bounds 
+                          lx 
+                          new-y 
+                          w 
+                          padding 
+                          @(PanelState.row-height &state))]
           (do
-            (Context.set-active-panel! ctx (Maybe.Just new-pstate))
-            rect))
-      (Maybe.Nothing)
-        (GuiRect.init 0.0f 0.0f 100.0f 20.0f)))
+            (Context.set-active-panel! ctx (Maybe.Just new-state))
+            (GuiRect.init (+ px lx) (+ py ly) w height)))))
 
-  ;; === WIDGETS ===
-
-  (doc begin-panel "Starts a layout panel window.")
   (defn begin-panel [ctx id x y w h title]
     (let [bounds (GuiRect.init x y w h)
           pad 8.0f
           pstate (PanelState.init @&bounds pad 32.0f (- w (* pad 2.0f)) pad 24.0f)
-          bg-color (Color4.init 0.12f 0.12f 0.16f 0.92f)
-          header-color (Color4.init 0.18f 0.18f 0.24f 1.0f)
-          header-rect (GuiRect.init x y w 26.0f)]
+          bg-color (Color4.init 0.3f 0.3f 0.35f 1.0f)
+          header-color (Color4.init 0.45f 0.45f 0.5f 1.0f)
+          header-rect (GuiRect.init x y w 26.0f)
+          mx @(Context.mouse-x ctx)
+          my @(Context.mouse-y ctx)]
       (do
         (Context.set-active-panel! ctx (Maybe.Just pstate))
+        
+        ;; Input Capture: check if mouse is inside panel
+        (when (GuiRect.contains? &bounds mx my)
+          (Context.set-input-captured! ctx true))
+          
+        ;; Push the clip rect stack for this panel
+        (push-clip-rect ctx &bounds)
+        
         ;; Push background rectangle (corner radius 6 pixels)
-        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&bounds bg-color 6.0f))
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&bounds bg-color 6.0f (get-active-clip-rect ctx)))
         ;; Push header bar rectangle
-        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect header-rect header-color 6.0f))
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect header-rect header-color 6.0f (get-active-clip-rect ctx)))
         ;; Push header title text
         (let [title-rect (GuiRect.init (+ x pad) (+ y 4.0f) (- w (* pad 2.0f)) 20.0f)
-              text-color (Color4.init 0.9f 0.9f 0.95f 1.0f)]
-          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text title-rect text-color title)))
+              text-color (Color4.init 1.0f 1.0f 1.0f 1.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text title-rect text-color title (get-active-clip-rect ctx))))
         )))
 
-  (doc end-panel "Closes layout calculations for the current panel.")
   (defn end-panel [ctx]
-    (Context.set-active-panel! ctx (Maybe.Nothing)))
+    (do
+      (Context.set-active-panel! ctx (Maybe.Nothing))
+      (pop-clip-rect ctx)))
 
-  (doc label "Renders a text string inside the active panel.")
   (defn label [ctx text]
     (let [rect (get-next-widget-rect! ctx 18.0f)
-          color (Color4.init 0.85f 0.85f 0.88f 1.0f)]
-      (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text rect color text))))
+          color (Color4.init 1.0f 1.0f 1.0f 1.0f)]
+      (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text rect color text (get-active-clip-rect ctx)))))
 
-  (doc button "Renders a clickable button widget. Returns true if clicked.")
   (defn button [ctx id label-text]
     (let [rect (get-next-widget-rect! ctx 24.0f)
+          hashed-id (get-hashed-id ctx id)
           mx @(Context.mouse-x ctx)
           my @(Context.mouse-y ctx)
           hovered (GuiRect.contains? &rect mx my)
@@ -176,42 +281,55 @@
           ;; Style based on mouse hover/click state
           bg-color (if hovered
                      (if @(Context.mouse-down ctx)
-                       (Color4.init 0.35f 0.35f 0.45f 1.0f)
-                       (Color4.init 0.28f 0.28f 0.36f 1.0f))
-                     (Color4.init 0.2f 0.2f 0.26f 1.0f))
-          text-color (Color4.init 0.95f 0.95f 1.0f 1.0f)]
+                       (Color4.init 0.6f 0.6f 0.7f 1.0f)
+                       (Color4.init 0.5f 0.5f 0.6f 1.0f))
+                     (Color4.init 0.4f 0.4f 0.45f 1.0f))
+          text-color (Color4.init 1.0f 1.0f 1.0f 1.0f)]
       (do
         (when hovered
           (Context.set-hot-id! ctx @id))
         (when clicked
           (Context.set-active-id! ctx @id))
-        ;; Draw button background (radius 4.0)
-        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&rect bg-color 4.0f))
-        ;; Draw label
-        (let [text-rect (GuiRect.init (+ @(GuiRect.x &rect) 6.0f) (+ @(GuiRect.y &rect) 3.0f) (- @(GuiRect.w &rect) 12.0f) 18.0f)]
-          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color label-text)))
+          
+        ;; 1. Draw Button Rectangle (corner radius 4)
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&rect bg-color 4.0f (get-active-clip-rect ctx)))
+        ;; 2. Draw Label Text inside button
+        (let [pad 6.0f
+              text-w (text-width &label-text 14.0f)
+              text-x (+ @(GuiRect.x &rect) (/ (- @(GuiRect.w &rect) text-w) 2.0f))
+              text-y (+ @(GuiRect.y &rect) 4.0f)
+              text-rect (GuiRect.init text-x text-y text-w 16.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color label-text (get-active-clip-rect ctx))))
+          
         clicked)))
 
-  (doc slider "Renders an immediate slider. Returns (Just new-value) if changed, or Nothing.")
   (defn slider [ctx id val min-val max-val label-text]
-    (let [rect (get-next-widget-rect! ctx 22.0f)
+    (let [rect (get-next-widget-rect! ctx 20.0f)
+          hashed-id (get-hashed-id ctx id)
+          
+          x @(GuiRect.x &rect)
+          y @(GuiRect.y &rect)
+          w @(GuiRect.w &rect)
+          h @(GuiRect.h &rect)
+          
+          ;; Layout split: 35% label text, 65% slider track
+          label-w (* w 0.35f)
+          track-x (+ x label-w)
+          track-w (- w label-w)
+          track-h 6.0f
+          track-y (+ y (/ (- h track-h) 2.0f))
+          track-rect (GuiRect.init track-x track-y track-w track-h)
+          
+          knob-size 14.0f
+          knob-radius (* knob-size 0.5f)
+          
           mx @(Context.mouse-x ctx)
           my @(Context.mouse-y ctx)
           
-          ;; Slider layout parameters
-          label-w (* @(GuiRect.w &rect) 0.35f)
-          track-x (+ @(GuiRect.x &rect) label-w)
-          track-w (- @(GuiRect.w &rect) label-w)
-          track-h 6.0f
-          track-y (+ @(GuiRect.y &rect) 8.0f)
-          
-          track-rect (GuiRect.init track-x track-y track-w track-h)
-          knob-size 14.0f
-          
-          ;; Calculate hover over the track/knob bounds
-          interactive-rect (GuiRect.init track-x @(GuiRect.y &rect) track-w @(GuiRect.h &rect))
-          hovered (GuiRect.contains? &interactive-rect mx my)
-          active-id (Context.active-id ctx)
+          ;; Slider interactivity checking full widget height on the track segment
+          interact-rect (GuiRect.init track-x y track-w h)
+          hovered (GuiRect.contains? &interact-rect mx my)
+          act-id @(Context.active-id ctx)
           result (Maybe.Nothing)]
       (do
         (when hovered
@@ -220,7 +338,7 @@
           (Context.set-active-id! ctx @id))
           
         ;; Dragging logic
-        (when (= active-id id)
+        (when (= &act-id id)
           (if @(Context.mouse-down ctx)
             (let [pct (Double.clamp 0.0 1.0 (Double.from-float (/ (- mx track-x) track-w)))
                   new-val (+ min-val (* (Double.to-float pct) (- max-val min-val)))]
@@ -230,31 +348,30 @@
         ;; Render elements
         ;; 1. Draw Label Text
         (let [text-rect (GuiRect.init @(GuiRect.x &rect) @(GuiRect.y &rect) label-w 18.0f)
-              text-color (Color4.init 0.8f 0.8f 0.85f 1.0f)]
-          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color label-text)))
+              text-color (Color4.init 1.0f 1.0f 1.0f 1.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color label-text (get-active-clip-rect ctx))))
           
         ;; 2. Draw Track Bar
-        (let [track-color (Color4.init 0.15f 0.15f 0.18f 1.0f)]
-          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect track-rect track-color 2.0f)))
+        (let [track-color (Color4.init 0.2f 0.2f 0.25f 1.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect track-rect track-color 2.0f (get-active-clip-rect ctx))))
           
         ;; 3. Draw Knob
         (let [current-val (match-ref &result (Maybe.Just v) @v _ val)
               val-pct (/ (- current-val min-val) (- max-val min-val))
-              knob-x (- (+ track-x (* val-pct track-w)) (* knob-size 0.5f))
-              knob-y (- (+ track-y (* track-h 0.5f)) (* knob-size 0.5f))
+              knob-x (- (+ track-x (* val-pct track-w)) knob-radius)
+              knob-y (- (+ track-y (* track-h 0.5f)) knob-radius)
               knob-rect (GuiRect.init knob-x knob-y knob-size knob-size)
-              knob-color (if (= active-id id)
-                           (Color4.init 0.45f 0.45f 0.85f 1.0f)
+              knob-color (if (= &act-id id)
+                           (Color4.init 0.8f 0.8f 1.0f 1.0f)
                            (if hovered
-                             (Color4.init 0.35f 0.35f 0.65f 1.0f)
-                             (Color4.init 0.28f 0.28f 0.48f 1.0f)))]
-          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect knob-rect knob-color (* knob-size 0.5f))))
+                             (Color4.init 0.7f 0.7f 0.95f 1.0f)
+                             (Color4.init 0.6f 0.6f 0.8f 1.0f)))]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect knob-rect knob-color (* knob-size 0.5f) (get-active-clip-rect ctx))))
           
         result)))
 
   ;; === RENDER GEOMETRY GENERATION ===
 
-  (doc generate-vertices "Processes the active draw commands and populates a vertex buffer.")
   (defn generate-vertices [ctx]
     (let [cmds (Context.draw-commands ctx)
           num-cmds (Array.length cmds)
@@ -262,58 +379,94 @@
       (do
         (for [i 0 num-cmds]
           (match-ref (Array.unsafe-nth cmds i)
-            (GuiDrawCommand.Rect rect color radius)
+            (GuiDrawCommand.Rect rect color radius c-rect)
               (let [rx @(GuiRect.x rect)
                     ry @(GuiRect.y rect)
                     rw @(GuiRect.w rect)
                     rh @(GuiRect.h rect)
                     
-                    r @(Color4.r color)
-                    g @(Color4.g color)
-                    b @(Color4.b color)
-                    a @(Color4.a color)
-                    
-                    ;; Quad corners
-                    v0 (Vertex.init rx ry 0.0f 0.0f r g b a 0.0f rw rh @radius)
-                    v1 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 0.0f rw rh @radius)
-                    v2 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 0.0f rw rh @radius)
-                    
-                    v3 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 0.0f rw rh @radius)
-                    v4 (Vertex.init (+ rx rw) (+ ry rh) 1.0f 1.0f r g b a 0.0f rw rh @radius)
-                    v5 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 0.0f rw rh @radius)]
-                (do
-                  (Array.push-back! &verts v0)
-                  (Array.push-back! &verts v1)
-                  (Array.push-back! &verts v2)
-                  (Array.push-back! &verts v3)
-                  (Array.push-back! &verts v4)
-                  (Array.push-back! &verts v5)))
-            
-            (GuiDrawCommand.Text rect color str-val)
-              ;; For this initial version, text layout generates placeholder rectangles.
-              ;; A future version will map ASCII letters to the SDF font UV atlas.
+                    intersected (intersect-rects rect c-rect)
+                    ix @(GuiRect.x &intersected)
+                    iy @(GuiRect.y &intersected)
+                    iw @(GuiRect.w &intersected)
+                    ih @(GuiRect.h &intersected)]
+                (when (and (> iw 0.0f) (> ih 0.0f))
+                  (let [r @(Color4.r color)
+                        g @(Color4.g color)
+                        b @(Color4.b color)
+                        a @(Color4.a color)
+                        
+                        cx (+ rx (* rw 0.5f))
+                        cy (+ ry (* rh 0.5f))
+                        
+                        uv0-u (/ (- ix rx) rw)
+                        uv0-v (/ (- iy ry) rh)
+                        v0 (Vertex.init ix iy uv0-u uv0-v r g b a 0.0f rw rh @radius)
+                        
+                        uv1-u (/ (- ix rx) rw)
+                        uv1-v (/ (- (+ iy ih) ry) rh)
+                        v1 (Vertex.init ix (+ iy ih) uv1-u uv1-v r g b a 0.0f rw rh @radius)
+                        
+                        uv2-u (/ (- (+ ix iw) rx) rw)
+                        uv2-v (/ (- iy ry) rh)
+                        v2 (Vertex.init (+ ix iw) iy uv2-u uv2-v r g b a 0.0f rw rh @radius)
+                        
+                        v3 @&v2
+                        v4 @&v1
+                        
+                        uv5-u (/ (- (+ ix iw) rx) rw)
+                        uv5-v (/ (- (+ iy ih) ry) rh)
+                        v5 (Vertex.init (+ ix iw) (+ iy ih) uv5-u uv5-v r g b a 0.0f rw rh @radius)]
+                    (do
+                      (Array.push-back! &verts v0)
+                      (Array.push-back! &verts v1)
+                      (Array.push-back! &verts v2)
+                      (Array.push-back! &verts v3)
+                      (Array.push-back! &verts v4)
+                      (Array.push-back! &verts v5)))))
+              
+            (GuiDrawCommand.Text rect color str-val c-rect)
               (let [rx @(GuiRect.x rect)
                     ry @(GuiRect.y rect)
                     rw @(GuiRect.w rect)
                     rh @(GuiRect.h rect)
-                    r @(Color4.r color)
-                    g @(Color4.g color)
-                    b @(Color4.b color)
-                    a @(Color4.a color)
-                    v0 (Vertex.init rx ry 0.0f 0.0f r g b a 1.0f rw rh 0.0f)
-                    v1 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 1.0f rw rh 0.0f)
-                    v2 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 1.0f rw rh 0.0f)
-                    v3 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 1.0f rw rh 0.0f)
-                    v4 (Vertex.init (+ rx rw) (+ ry rh) 1.0f 1.0f r g b a 1.0f rw rh 0.0f)
-                    v5 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 1.0f rw rh 0.0f)]
-                (do
-                  (Array.push-back! &verts v0)
-                  (Array.push-back! &verts v1)
-                  (Array.push-back! &verts v2)
-                  (Array.push-back! &verts v3)
-                  (Array.push-back! &verts v4)
-                  (Array.push-back! &verts v5)))
-          ))
+                    
+                    intersected (intersect-rects rect c-rect)
+                    ix @(GuiRect.x &intersected)
+                    iy @(GuiRect.y &intersected)
+                    iw @(GuiRect.w &intersected)
+                    ih @(GuiRect.h &intersected)]
+                (when (and (> iw 0.0f) (> ih 0.0f))
+                  (let [r @(Color4.r color)
+                        g @(Color4.g color)
+                        b @(Color4.b color)
+                        a @(Color4.a color)
+                        
+                        uv0-u (/ (- ix rx) rw)
+                        uv0-v (/ (- iy ry) rh)
+                        v0 (Vertex.init ix iy uv0-u uv0-v r g b a 1.0f rw rh 0.0f)
+                        
+                        uv1-u (/ (- ix rx) rw)
+                        uv1-v (/ (- (+ iy ih) ry) rh)
+                        v1 (Vertex.init ix (+ iy ih) uv1-u uv1-v r g b a 1.0f rw rh 0.0f)
+                        
+                        uv2-u (/ (- (+ ix iw) rx) rw)
+                        uv2-v (/ (- iy ry) rh)
+                        v2 (Vertex.init (+ ix iw) iy uv2-u uv2-v r g b a 1.0f rw rh 0.0f)
+                        
+                        v3 @&v2
+                        v4 @&v1
+                        
+                        uv5-u (/ (- (+ ix iw) rx) rw)
+                        uv5-v (/ (- (+ iy ih) ry) rh)
+                        v5 (Vertex.init (+ ix iw) (+ iy ih) uv5-u uv5-v r g b a 1.0f rw rh 0.0f)]
+                    (do
+                      (Array.push-back! &verts v0)
+                      (Array.push-back! &verts v1)
+                      (Array.push-back! &verts v2)
+                      (Array.push-back! &verts v3)
+                      (Array.push-back! &verts v4)
+                      (Array.push-back! &verts v5)))))))
         verts)))
 
   (defn generate-vertices-flat [ctx]
@@ -331,10 +484,6 @@
               (Array.push-back! &flat @(Vertex.r v))
               (Array.push-back! &flat @(Vertex.g v))
               (Array.push-back! &flat @(Vertex.b v))
-              (Array.push-back! &flat @(Vertex.a v))
-              (Array.push-back! &flat @(Vertex.mode v))
-              (Array.push-back! &flat @(Vertex.rect-w v))
-              (Array.push-back! &flat @(Vertex.rect-h v))
-              (Array.push-back! &flat @(Vertex.radius v)))))
+              (Array.push-back! &flat @(Vertex.a v)))))
         flat)))
 )

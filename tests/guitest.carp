@@ -37,52 +37,72 @@
     (do
       (for [i 0 num-cmds]
         (match-ref (Array.unsafe-nth cmds i)
-          (GuiDrawCommand.Rect rect color radius)
+          (GuiDrawCommand.Rect rect color radius c-rect)
             (let [rx @(GuiRect.x rect)
                   ry @(GuiRect.y rect)
                   rw @(GuiRect.w rect)
                   rh @(GuiRect.h rect)
                   
-                  r @(Color4.r color)
-                  g @(Color4.g color)
-                  b @(Color4.b color)
-                  a @(Color4.a color)
-                  
-                  ;; 6 vertices per quad (stride 8: x, y, u, v, r, g, b, a)
-                  v-data [
-                    rx ry 0.0f 0.0f r g b a
-                    (+ rx rw) ry 1.0f 0.0f r g b a
-                    rx (+ ry rh) 0.0f 1.0f r g b a
-                    
-                    (+ rx rw) ry 1.0f 0.0f r g b a
-                    (+ rx rw) (+ ry rh) 1.0f 1.0f r g b a
-                    rx (+ ry rh) 0.0f 1.0f r g b a
-                  ]]
-              (for [j 0 48]
-                (Array.push-back! &flat @(Array.unsafe-nth &v-data j))))
+                  intersected (Gui.intersect-rects rect c-rect)
+                  ix @(GuiRect.x &intersected)
+                  iy @(GuiRect.y &intersected)
+                  iw @(GuiRect.w &intersected)
+                  ih @(GuiRect.h &intersected)]
+              (when (and (> iw 0.0f) (> ih 0.0f))
+                (let [r @(Color4.r color)
+                      g @(Color4.g color)
+                      b @(Color4.b color)
+                      a @(Color4.a color)
+                      
+                      ;; Pack radius and mode into size using clipped dimensions
+                      z-val (+ iw (* @radius 10000.0f))
+                      w-val (+ ih (* 0.0f 10000.0f))
+                      
+                      ;; 6 vertices per quad (stride 8: x, y, packed-w, packed-h, r, g, b, a)
+                      v-data [
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                        
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                      ]]
+                  (for [j 0 48]
+                    (Array.push-back! &flat @(Array.unsafe-nth &v-data j))))))
           
-          (GuiDrawCommand.Text rect color str-val)
+          (GuiDrawCommand.Text rect color str-val c-rect)
             (let [rx @(GuiRect.x rect)
                   ry @(GuiRect.y rect)
                   rw @(GuiRect.w rect)
                   rh @(GuiRect.h rect)
                   
-                  r @(Color4.r color)
-                  g @(Color4.g color)
-                  b @(Color4.b color)
-                  a @(Color4.a color)
-                  
-                  v-data [
-                    rx ry 0.0f 0.0f r g b a
-                    (+ rx rw) ry 1.0f 0.0f r g b a
-                    rx (+ ry rh) 0.0f 1.0f r g b a
-                    
-                    (+ rx rw) ry 1.0f 0.0f r g b a
-                    (+ rx rw) (+ ry rh) 1.0f 1.0f r g b a
-                    rx (+ ry rh) 0.0f 1.0f r g b a
-                  ]]
-              (for [j 0 48]
-                (Array.push-back! &flat @(Array.unsafe-nth &v-data j))))
+                  intersected (Gui.intersect-rects rect c-rect)
+                  ix @(GuiRect.x &intersected)
+                  iy @(GuiRect.y &intersected)
+                  iw @(GuiRect.w &intersected)
+                  ih @(GuiRect.h &intersected)]
+              (when (and (> iw 0.0f) (> ih 0.0f))
+                (let [r @(Color4.r color)
+                      g @(Color4.g color)
+                      b @(Color4.b color)
+                      a @(Color4.a color)
+                      
+                      ;; Pack radius (0.0) and mode (1.0) into size using clipped dimensions
+                      z-val (+ iw (* 0.0f 10000.0f))
+                      w-val (+ ih (* 1.0f 10000.0f))
+                      
+                      v-data [
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                        
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                        ix iy z-val w-val r g b a
+                      ]]
+                  (for [j 0 48]
+                    (Array.push-back! &flat @(Array.unsafe-nth &v-data j))))))
         ))
       flat)))
 
@@ -129,80 +149,94 @@
                         (Init.destroy-app app)
                         -4)
                     (Result.Success bg)
-                      (let [;; Instantiate GUI Context
-                            gui-ctx (Gui.Context.create)
-                            
-                            ;; Slider value state
-                            slider-val 0.5f
-                            
-                            frame-count 0]
-                        (do
-                          ;; Write initial screen dimensions to uniform buffer
-                          (let [res-data [(Float.from-int width) (Float.from-int height)]]
-                            (WGPU.write-floats ctx (WGPURender.uniform-buffer-get-buffer screen-res-buf) &res-data))
-                            
-                          (while (= (GLFW.window-should-close win) 0)
-                            (let [t-start (System.nanotime)
-                                  ignored-events (GLFW.poll-events)
-                                  
-                                  ;; Fetch mouse state
-                                  mx 0.0
-                                  my 0.0
-                                  ignored-cursor (GLFW.get-cursor-pos win (address &mx) (address &my))
-                                  click-state (= (GLFW.get-mouse-button win GLFW.BUTTON_LEFT) GLFW.PRESS)]
-                              (do
-                                ;; Update GUI state (passing click-state as both down and clicked for simplicity)
-                                (Gui.begin &gui-ctx mx my click-state click-state)
+                      (match (WGPURender.create-depth-texture ctx width height)
+                        (Result.Error e)
+                          (do
+                            (IO.println &(str* "Depth texture failed: " e))
+                            (WGPURender.free-bind-group bg)
+                            (WGPURender.free-uniform-buffer screen-res-buf)
+                            (WGPURender.free-geom-pipeline pipe)
+                            (Init.destroy-app app)
+                            -5)
+                        (Result.Success depth)
+                          (let [;; Instantiate GUI Context
+                                gui-ctx (Gui.Context.create)
                                 
-                                ;; Render "Henlo World" GUI Panel
-                                (Gui.begin-panel &gui-ctx @"henlo_panel" 50.0f 50.0f 300.0f 250.0f @"Henlo World")
-                                  (Gui.label &gui-ctx @"Native Carp GUI Panel")
-                                  
-                                  (if (Gui.button &gui-ctx &@"click_btn" @"Click Me!")
-                                    (IO.println "Button clicked in GUI smoke test!")
-                                    ())
+                                ;; Slider value state
+                                slider-val 0.5f
+                                
+                                frame-count 0]
+                            (do
+                              ;; Write initial screen dimensions to uniform buffer
+                              (let [res-data [(Float.from-int width) (Float.from-int height)]]
+                                (WGPU.write-floats ctx (WGPURender.uniform-buffer-get-buffer screen-res-buf) &res-data))
+                                
+                              (while (= (GLFW.window-should-close win) 0)
+                                (let [t-start (System.nanotime)
+                                      ignored-events (GLFW.poll-events)
+                                      
+                                      ;; Fetch mouse state
+                                      mx 0.0
+                                      my 0.0
+                                      ignored-cursor (GLFW.get-cursor-pos win (address &mx) (address &my))
+                                      click-state (= (GLFW.get-mouse-button win GLFW.BUTTON_LEFT) GLFW.PRESS)]
+                                  (do
+                                    ;; Update GUI state (passing click-state as both down and clicked for simplicity)
+                                    (Gui.begin &gui-ctx mx my click-state click-state)
                                     
-                                  (match (Gui.slider &gui-ctx &@"scale_slider" slider-val 0.0f 1.0f @"Test Slider")
-                                    (Maybe.Just new-val)
+                                    ;; Render "Henlo World" GUI Panel
+                                    (Gui.begin-panel &gui-ctx @"henlo_panel" 50.0f 50.0f 300.0f 250.0f @"Henlo World")
+                                      (Gui.label &gui-ctx @"Native Carp GUI Panel")
+                                      
+                                      (if (Gui.button &gui-ctx &@"click_btn" @"Click Me!")
+                                        (IO.println "Button clicked in GUI smoke test!")
+                                        ())
+                                        
+                                      (match (Gui.slider &gui-ctx &@"scale_slider" slider-val 0.0f 1.0f @"Test Slider")
+                                        (Maybe.Just new-val)
+                                          (do
+                                            (set! slider-val new-val)
+                                            (IO.println &(str* "Slider value changed to: " (Double.str (Double.from-float new-val)))))
+                                        (Maybe.Nothing) ())
+                                    (Gui.end-panel &gui-ctx)
+                                    
+                                    ;; Generate flat float array for vertex buffer (stride 32: 8 floats per vertex)
+                                    (let [flat-verts (generate-smoke-vertices &gui-ctx)
+                                          num-verts (Uint32.from-long (Long.from-int (/ (Array.length &flat-verts) 8)))]
                                       (do
-                                        (set! slider-val new-val)
-                                        (IO.println &(str* "Slider value changed to: " (Double.str (Double.from-float new-val)))))
-                                    (Maybe.Nothing) ())
-                                (Gui.end-panel &gui-ctx)
-                                
-                                ;; Generate flat float array for vertex buffer (stride 32: 8 floats per vertex)
-                                (let [flat-verts (generate-smoke-vertices &gui-ctx)
-                                      num-verts (Uint32.from-long (Long.from-int (/ (Array.length &flat-verts) 8)))]
-                                  (when (not (Uint32.= num-verts (Uint32.from-long (Long.from-int 0))))
-                                    (match (WGPURender.create-vertex-buffer ctx &flat-verts)
-                                      (Result.Error e) (IO.println &(str* "VBO failed: " e))
-                                      (Result.Success vb)
-                                        (let [frame-res (WGPURender.begin-frame surf ctx)]
-                                          (match frame-res
-                                            (Result.Error e) (IO.println &(str* "Begin frame failed: " e))
-                                            (Result.Success frame)
-                                              (do
-                                                ;; Render GUI geometry onto screen
-                                                (WGPURender.run-geom-pass-overlay frame pipe bg vb NULL num-verts (Maybe.Nothing))
-                                                (WGPURender.end-frame frame surf ctx)
-                                                (WGPURender.free-frame frame)
-                                                (WGPURender.free-vertex-buffer vb)))))))
-                                                
-                                ;; Throttle frame loop slightly to reduce CPU usage
-                                (let [t-now (System.nanotime)
-                                      t-elapsed (/ (Double.from-long (Uint64.to-long (Uint64.- t-now t-start))) 1000000.0)
-                                      delay (max 0.0 (- 16.666 t-elapsed))]
-                                  (System.sleep-micros (Double.to-int (* delay 1000.0))))
-                                (set! frame-count (inc frame-count))
-                                ;; Automatically exit after 300 frames (about 5 seconds) to make it a self-terminating smoke test
-                                (when (>= frame-count 300)
-                                  (GLFW.set-window-should-close win 1))
-                                )))
-                                
-                          ;; Cleanup WGPU resources
-                          (WGPURender.free-uniform-buffer screen-res-buf)
-                          (WGPURender.free-bind-group bg)
-                          (WGPURender.free-geom-pipeline pipe)
-                          (Init.destroy-app app)
-                          (IO.println "GUI smoke test completed successfully.")
-                          0)))))))))
+                                        (when (= frame-count 0)
+                                          (IO.println &(str* "Draw commands count: " (Int.str (Array.length (Context.draw-commands &gui-ctx))) " Vertices: " (Long.str (Uint32.to-long num-verts)))))
+                                        (when (not (Uint32.= num-verts (Uint32.from-long (Long.from-int 0))))
+                                          (match (WGPURender.create-vertex-buffer ctx &flat-verts)
+                                            (Result.Error e) (IO.println &(str* "VBO failed: " e))
+                                            (Result.Success vb)
+                                              (let [frame-res (WGPURender.begin-frame surf ctx)]
+                                                (match frame-res
+                                                  (Result.Error e) (IO.println &(str* "Begin frame failed: " e))
+                                                  (Result.Success frame)
+                                                    (do
+                                                      ;; Render GUI geometry onto screen
+                                                      (WGPURender.run-geom-pass-overlay frame pipe bg vb depth num-verts (Maybe.Nothing))
+                                                      (WGPURender.end-frame frame surf ctx)
+                                                      (WGPURender.free-frame frame)
+                                                      (WGPURender.free-vertex-buffer vb))))))))
+                                                    
+                                    ;; Throttle frame loop slightly to reduce CPU usage
+                                    (let [t-now (System.nanotime)
+                                          t-elapsed (/ (Double.from-long (Uint64.to-long (Uint64.- t-now t-start))) 1000000.0)
+                                          delay (max 0.0 (- 16.666 t-elapsed))]
+                                      (System.sleep-micros (Double.to-int (* delay 1000.0))))
+                                    (set! frame-count (inc frame-count))
+                                    ;; Automatically exit after 300 frames (about 5 seconds) to make it a self-terminating smoke test
+                                    (when (>= frame-count 600)
+                                      (GLFW.set-window-should-close win 1))
+                                    )))
+                                    
+                              ;; Cleanup WGPU resources
+                              (WGPURender.free-depth-texture depth)
+                              (WGPURender.free-uniform-buffer screen-res-buf)
+                              (WGPURender.free-bind-group bg)
+                              (WGPURender.free-geom-pipeline pipe)
+                              (Init.destroy-app app)
+                              (IO.println "GUI smoke test completed successfully.")
+                              0))))))))))
