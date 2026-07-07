@@ -62,7 +62,10 @@
         (let [cmds (Context.draw-commands &ctx)]
           (do
             (set! state (assert-true &state (= (Array.length cmds) 4) "Draw command list has 4 elements"))
-            (let [verts (Gui.generate-vertices &ctx)]
-              (set! state (assert-true &state (= (Array.length &verts) 24) "Generated 24 vertices (4 commands * 6 vertices per quad)"))))))
+            (let [verts (Gui.generate-vertices &ctx)
+                  flat-verts (Gui.generate-vertices-flat &ctx)]
+              (do
+                (set! state (assert-true &state (= (Array.length &verts) 24) "Generated 24 vertices (4 commands * 6 vertices per quad)"))
+                (set! state (assert-true &state (= (Array.length &flat-verts) 288) "Generated 288 flat floats (24 vertices * 12 floats per vertex)")))))))
 
       state)))

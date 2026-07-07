@@ -98,6 +98,7 @@
   (sig button (Fn [(Ref Context) (Ref String) String] Bool))
   (sig slider (Fn [(Ref Context) (Ref String) Float Float Float String] (Maybe Float)))
   (sig generate-vertices (Fn [(Ref Context)] (Array Vertex)))
+  (sig generate-vertices-flat (Fn [(Ref Context)] (Array Float)))
 
   ;; === IMGUI LIFECYCLE ===
 
@@ -314,4 +315,26 @@
                   (Array.push-back! &verts v5)))
           ))
         verts)))
+
+  (defn generate-vertices-flat [ctx]
+    (let [verts (generate-vertices ctx)
+          num (Array.length &verts)
+          flat []]
+      (do
+        (for [i 0 num]
+          (let [v (Array.unsafe-nth &verts i)]
+            (do
+              (Array.push-back! &flat @(Vertex.x v))
+              (Array.push-back! &flat @(Vertex.y v))
+              (Array.push-back! &flat @(Vertex.u v))
+              (Array.push-back! &flat @(Vertex.v v))
+              (Array.push-back! &flat @(Vertex.r v))
+              (Array.push-back! &flat @(Vertex.g v))
+              (Array.push-back! &flat @(Vertex.b v))
+              (Array.push-back! &flat @(Vertex.a v))
+              (Array.push-back! &flat @(Vertex.mode v))
+              (Array.push-back! &flat @(Vertex.rect-w v))
+              (Array.push-back! &flat @(Vertex.rect-h v))
+              (Array.push-back! &flat @(Vertex.radius v)))))
+        flat)))
 )
