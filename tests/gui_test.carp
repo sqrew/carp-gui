@@ -1,0 +1,68 @@
+;; Desktop/carp-gui/tests/gui_test.carp
+(load "Test.carp")
+(use Test)
+(load "../gui.carp")
+
+(deftest gui-test
+  (let [state (Test.State.init 0 0)
+        ctx (Gui.Context.create)]
+    (do
+      ;; Test 1: Bounding Box contains?
+      (let [rect (GuiRect.init 10.0f 20.0f 100.0f 50.0f)]
+        (do
+          (set! state (assert-true &state (GuiRect.contains? &rect 15.0f 30.0f) "GuiRect contains (15, 30)"))
+          (set! state (assert-true &state (GuiRect.contains? &rect 10.0f 20.0f) "GuiRect contains top-left edge"))
+          (set! state (assert-true &state (GuiRect.contains? &rect 110.0f 70.0f) "GuiRect contains bottom-right edge"))
+          (set! state (assert-false &state (GuiRect.contains? &rect 5.0f 30.0f) "GuiRect does not contain (5, 30)"))
+          (set! state (assert-false &state (GuiRect.contains? &rect 50.0f 10.0f) "GuiRect does not contain (50, 10)"))))
+
+      ;; Test 2: Context lifecycle begin
+      (do
+        (Gui.begin &ctx 50.0 60.0 true false)
+        (set! state (assert-true &state (Float.approx @(Context.mouse-x &ctx) 50.0f) "Context mouse-x updated"))
+        (set! state (assert-true &state (Float.approx @(Context.mouse-y &ctx) 60.0f) "Context mouse-y updated"))
+        (set! state (assert-true &state @(Context.mouse-down &ctx) "Context mouse-down updated"))
+        (set! state (assert-false &state @(Context.mouse-clicked &ctx) "Context mouse-clicked updated"))
+        (set! state (assert-true &state (Array.empty? (Context.draw-commands &ctx)) "Draw commands cleared on begin")))
+
+      ;; Test 3: Panel layout calculations
+      (do
+        (Gui.begin-panel &ctx @"my_panel" 10.0f 10.0f 200.0f 200.0f @"Title")
+        ;; PanelState should be active
+        (match @(Context.active-panel &ctx)
+          (Maybe.Just pstate)
+            (do
+              (set! state (assert-true &state (Float.approx @(GuiRect.w (PanelState.bounds &pstate)) 200.0f) "Active panel bounds width match"))
+              (set! state (assert-true &state (Float.approx @(PanelState.layout-y &pstate) 32.0f) "Initial panel layout Y starts after header")))
+          (Maybe.Nothing)
+            (set! state (assert-true &state false "Active panel state found")))
+        (Gui.end-panel &ctx)
+        (set! state (assert-true &state (Maybe.nothing? (Context.active-panel &ctx)) "Active panel cleared on end-panel")))
+
+      ;; Test 4: Layout auto-increment widget rectangles
+      (do
+        (Gui.begin &ctx 0.0 0.0 false false)
+        (Gui.begin-panel &ctx @"layout_test" 10.0f 20.0f 100.0f 100.0f @"Test")
+        (let [r1 (Gui.get-next-widget-rect! &ctx 15.0f)
+              r2 (Gui.get-next-widget-rect! &ctx 25.0f)]
+          (do
+            (set! state (assert-true &state (Float.approx @(GuiRect.x &r1) 18.0f) "First widget X has padding"))
+            (set! state (assert-true &state (Float.approx @(GuiRect.y &r1) 52.0f) "First widget Y matches layout Y"))
+            (set! state (assert-true &state (Float.approx @(GuiRect.x &r2) 18.0f) "Second widget X matches"))
+            (set! state (assert-true &state (Float.approx @(GuiRect.y &r2) 75.0f) "Second widget Y incremented by height + padding (52 + 15 + 8)"))))
+        (Gui.end-panel &ctx))
+
+      ;; Test 5: Verify draw commands list and vertex generation
+      (do
+        (Gui.begin &ctx 0.0 0.0 false false)
+        (Gui.begin-panel &ctx @"draw_test" 0.0f 0.0f 100.0f 100.0f @"Panel")
+        (Gui.label &ctx @"Label Text")
+        (Gui.end-panel &ctx)
+        ;; Draw commands should have: Background Rect, Header Rect, Title Text, Label Text
+        (let [cmds (Context.draw-commands &ctx)]
+          (do
+            (set! state (assert-true &state (= (Array.length cmds) 4) "Draw command list has 4 elements"))
+            (let [verts (Gui.generate-vertices &ctx)]
+              (set! state (assert-true &state (= (Array.length &verts) 24) "Generated 24 vertices (4 commands * 6 vertices per quad)"))))))
+
+      state)))

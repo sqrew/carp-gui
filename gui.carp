@@ -1,0 +1,317 @@
+;; Desktop/carp-gui/gui.carp
+;; A pure Carp native immediate-mode GUI library for WebGPU.
+
+(load "Vector.carp")
+
+(use Double)
+(use Vector2)
+(use Vector3)
+
+(doc Color4 "A 4-component Float color structure for GUI elements.")
+(deftype Color4 [
+  r Float
+  g Float
+  b Float
+  a Float
+])
+
+(doc Vertex "Matches the vertex input layout of gui.wgsl.")
+(deftype Vertex [
+  x Float
+  y Float
+  u Float
+  v Float
+  r Float
+  g Float
+  b Float
+  a Float
+  mode Float
+  rect-w Float
+  rect-h Float
+  radius Float
+])
+
+(doc GuiRect "Defines a 2D bounding box.")
+(deftype GuiRect [
+  x Float
+  y Float
+  w Float
+  h Float
+])
+
+(defmodule GuiRect
+  (defn contains? [r px py]
+    (and (and (>= px @(GuiRect.x r)) (<= px (+ @(GuiRect.x r) @(GuiRect.w r))))
+         (and (>= py @(GuiRect.y r)) (<= py (+ @(GuiRect.y r) @(GuiRect.h r))))))
+)
+
+(doc GuiDrawCommand "Batched shapes to be rendered.")
+(deftype GuiDrawCommand
+  (Rect [GuiRect Color4 Float]) ;; rect, color (rgba), corner_radius
+  (Text [GuiRect Color4 String]) ;; rect, color, content_string
+)
+
+(doc PanelState "Internal layout state for an active panel.")
+(deftype PanelState [
+  bounds GuiRect
+  layout-x Float
+  layout-y Float
+  layout-w Float
+  item-padding Float
+  row-height Float
+])
+
+(doc Context "The immediate-mode UI state and batch renderer data.")
+(deftype Context [
+  mouse-x Float
+  mouse-y Float
+  mouse-down Bool
+  mouse-clicked Bool
+  
+  active-id String
+  hot-id String
+  
+  draw-commands (Array GuiDrawCommand)
+  active-panel (Maybe PanelState)
+])
+
+(defmodule Context
+  (defn create []
+    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing)))
+
+  (defn clear! [ctx]
+    (do
+      (Context.set-draw-commands! ctx [])
+      (Context.set-active-panel! ctx (Maybe.Nothing))))
+)
+
+(defmodule Gui
+  (use Double)
+  (use Vector2)
+  (use Vector3)
+
+  (sig begin (Fn [(Ref Context) Double Double Bool Bool] ()))
+  (sig get-next-widget-rect! (Fn [(Ref Context) Float] GuiRect))
+  (sig begin-panel (Fn [(Ref Context) String Float Float Float Float String] ()))
+  (sig end-panel (Fn [(Ref Context)] ()))
+  (sig label (Fn [(Ref Context) String] ()))
+  (sig button (Fn [(Ref Context) (Ref String) String] Bool))
+  (sig slider (Fn [(Ref Context) (Ref String) Float Float Float String] (Maybe Float)))
+  (sig generate-vertices (Fn [(Ref Context)] (Array Vertex)))
+
+  ;; === IMGUI LIFECYCLE ===
+
+  (doc begin "Call at the start of the frame to update mouse input and clear old draw lists.")
+  (defn begin [ctx mx my down clicked]
+    (do
+      (Context.clear! ctx)
+      (Context.set-mouse-x! ctx (Double.to-float mx))
+      (Context.set-mouse-y! ctx (Double.to-float my))
+      (Context.set-mouse-down! ctx down)
+      (Context.set-mouse-clicked! ctx clicked)))
+
+  ;; === LAYOUT HELPERS ===
+
+  (defn get-next-widget-rect! [ctx wanted-h]
+    (match @(Context.active-panel ctx)
+      (Maybe.Just pstate)
+        (let [bx @(GuiRect.x (PanelState.bounds &pstate))
+              by @(GuiRect.y (PanelState.bounds &pstate))
+              lx @(PanelState.layout-x &pstate)
+              ly @(PanelState.layout-y &pstate)
+              lw @(PanelState.layout-w &pstate)
+              pad @(PanelState.item-padding &pstate)
+              rx (+ bx lx)
+              ry (+ by ly)
+              rect (GuiRect.init rx ry lw wanted-h)
+              new-ly (+ (+ ly wanted-h) pad)
+              new-pstate (PanelState.init @(PanelState.bounds &pstate) lx new-ly lw pad @(PanelState.row-height &pstate))]
+          (do
+            (Context.set-active-panel! ctx (Maybe.Just new-pstate))
+            rect))
+      (Maybe.Nothing)
+        (GuiRect.init 0.0f 0.0f 100.0f 20.0f)))
+
+  ;; === WIDGETS ===
+
+  (doc begin-panel "Starts a layout panel window.")
+  (defn begin-panel [ctx id x y w h title]
+    (let [bounds (GuiRect.init x y w h)
+          pad 8.0f
+          pstate (PanelState.init @&bounds pad 32.0f (- w (* pad 2.0f)) pad 24.0f)
+          bg-color (Color4.init 0.12f 0.12f 0.16f 0.92f)
+          header-color (Color4.init 0.18f 0.18f 0.24f 1.0f)
+          header-rect (GuiRect.init x y w 26.0f)]
+      (do
+        (Context.set-active-panel! ctx (Maybe.Just pstate))
+        ;; Push background rectangle (corner radius 6 pixels)
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&bounds bg-color 6.0f))
+        ;; Push header bar rectangle
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect header-rect header-color 6.0f))
+        ;; Push header title text
+        (let [title-rect (GuiRect.init (+ x pad) (+ y 4.0f) (- w (* pad 2.0f)) 20.0f)
+              text-color (Color4.init 0.9f 0.9f 0.95f 1.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text title-rect text-color title)))
+        )))
+
+  (doc end-panel "Closes layout calculations for the current panel.")
+  (defn end-panel [ctx]
+    (Context.set-active-panel! ctx (Maybe.Nothing)))
+
+  (doc label "Renders a text string inside the active panel.")
+  (defn label [ctx text]
+    (let [rect (get-next-widget-rect! ctx 18.0f)
+          color (Color4.init 0.85f 0.85f 0.88f 1.0f)]
+      (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text rect color text))))
+
+  (doc button "Renders a clickable button widget. Returns true if clicked.")
+  (defn button [ctx id label-text]
+    (let [rect (get-next-widget-rect! ctx 24.0f)
+          mx @(Context.mouse-x ctx)
+          my @(Context.mouse-y ctx)
+          hovered (GuiRect.contains? &rect mx my)
+          clicked (and hovered @(Context.mouse-clicked ctx))
+          
+          ;; Style based on mouse hover/click state
+          bg-color (if hovered
+                     (if @(Context.mouse-down ctx)
+                       (Color4.init 0.35f 0.35f 0.45f 1.0f)
+                       (Color4.init 0.28f 0.28f 0.36f 1.0f))
+                     (Color4.init 0.2f 0.2f 0.26f 1.0f))
+          text-color (Color4.init 0.95f 0.95f 1.0f 1.0f)]
+      (do
+        (when hovered
+          (Context.set-hot-id! ctx @id))
+        (when clicked
+          (Context.set-active-id! ctx @id))
+        ;; Draw button background (radius 4.0)
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&rect bg-color 4.0f))
+        ;; Draw label
+        (let [text-rect (GuiRect.init (+ @(GuiRect.x &rect) 6.0f) (+ @(GuiRect.y &rect) 3.0f) (- @(GuiRect.w &rect) 12.0f) 18.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color label-text)))
+        clicked)))
+
+  (doc slider "Renders an immediate slider. Returns (Just new-value) if changed, or Nothing.")
+  (defn slider [ctx id val min-val max-val label-text]
+    (let [rect (get-next-widget-rect! ctx 22.0f)
+          mx @(Context.mouse-x ctx)
+          my @(Context.mouse-y ctx)
+          
+          ;; Slider layout parameters
+          label-w (* @(GuiRect.w &rect) 0.35f)
+          track-x (+ @(GuiRect.x &rect) label-w)
+          track-w (- @(GuiRect.w &rect) label-w)
+          track-h 6.0f
+          track-y (+ @(GuiRect.y &rect) 8.0f)
+          
+          track-rect (GuiRect.init track-x track-y track-w track-h)
+          knob-size 14.0f
+          
+          ;; Calculate hover over the track/knob bounds
+          interactive-rect (GuiRect.init track-x @(GuiRect.y &rect) track-w @(GuiRect.h &rect))
+          hovered (GuiRect.contains? &interactive-rect mx my)
+          active-id (Context.active-id ctx)
+          result (Maybe.Nothing)]
+      (do
+        (when hovered
+          (Context.set-hot-id! ctx @id))
+        (when (and hovered @(Context.mouse-clicked ctx))
+          (Context.set-active-id! ctx @id))
+          
+        ;; Dragging logic
+        (when (= active-id id)
+          (if @(Context.mouse-down ctx)
+            (let [pct (Double.clamp 0.0 1.0 (Double.from-float (/ (- mx track-x) track-w)))
+                  new-val (+ min-val (* (Double.to-float pct) (- max-val min-val)))]
+              (set! result (Maybe.Just new-val)))
+            (Context.set-active-id! ctx @"")))
+            
+        ;; Render elements
+        ;; 1. Draw Label Text
+        (let [text-rect (GuiRect.init @(GuiRect.x &rect) @(GuiRect.y &rect) label-w 18.0f)
+              text-color (Color4.init 0.8f 0.8f 0.85f 1.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color label-text)))
+          
+        ;; 2. Draw Track Bar
+        (let [track-color (Color4.init 0.15f 0.15f 0.18f 1.0f)]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect track-rect track-color 2.0f)))
+          
+        ;; 3. Draw Knob
+        (let [current-val (match-ref &result (Maybe.Just v) @v _ val)
+              val-pct (/ (- current-val min-val) (- max-val min-val))
+              knob-x (- (+ track-x (* val-pct track-w)) (* knob-size 0.5f))
+              knob-y (- (+ track-y (* track-h 0.5f)) (* knob-size 0.5f))
+              knob-rect (GuiRect.init knob-x knob-y knob-size knob-size)
+              knob-color (if (= active-id id)
+                           (Color4.init 0.45f 0.45f 0.85f 1.0f)
+                           (if hovered
+                             (Color4.init 0.35f 0.35f 0.65f 1.0f)
+                             (Color4.init 0.28f 0.28f 0.48f 1.0f)))]
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect knob-rect knob-color (* knob-size 0.5f))))
+          
+        result)))
+
+  ;; === RENDER GEOMETRY GENERATION ===
+
+  (doc generate-vertices "Processes the active draw commands and populates a vertex buffer.")
+  (defn generate-vertices [ctx]
+    (let [cmds (Context.draw-commands ctx)
+          num-cmds (Array.length cmds)
+          verts []]
+      (do
+        (for [i 0 num-cmds]
+          (match-ref (Array.unsafe-nth cmds i)
+            (GuiDrawCommand.Rect rect color radius)
+              (let [rx @(GuiRect.x rect)
+                    ry @(GuiRect.y rect)
+                    rw @(GuiRect.w rect)
+                    rh @(GuiRect.h rect)
+                    
+                    r @(Color4.r color)
+                    g @(Color4.g color)
+                    b @(Color4.b color)
+                    a @(Color4.a color)
+                    
+                    ;; Quad corners
+                    v0 (Vertex.init rx ry 0.0f 0.0f r g b a 0.0f rw rh @radius)
+                    v1 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 0.0f rw rh @radius)
+                    v2 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 0.0f rw rh @radius)
+                    
+                    v3 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 0.0f rw rh @radius)
+                    v4 (Vertex.init (+ rx rw) (+ ry rh) 1.0f 1.0f r g b a 0.0f rw rh @radius)
+                    v5 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 0.0f rw rh @radius)]
+                (do
+                  (Array.push-back! &verts v0)
+                  (Array.push-back! &verts v1)
+                  (Array.push-back! &verts v2)
+                  (Array.push-back! &verts v3)
+                  (Array.push-back! &verts v4)
+                  (Array.push-back! &verts v5)))
+            
+            (GuiDrawCommand.Text rect color str-val)
+              ;; For this initial version, text layout generates placeholder rectangles.
+              ;; A future version will map ASCII letters to the SDF font UV atlas.
+              (let [rx @(GuiRect.x rect)
+                    ry @(GuiRect.y rect)
+                    rw @(GuiRect.w rect)
+                    rh @(GuiRect.h rect)
+                    r @(Color4.r color)
+                    g @(Color4.g color)
+                    b @(Color4.b color)
+                    a @(Color4.a color)
+                    v0 (Vertex.init rx ry 0.0f 0.0f r g b a 1.0f rw rh 0.0f)
+                    v1 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 1.0f rw rh 0.0f)
+                    v2 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 1.0f rw rh 0.0f)
+                    v3 (Vertex.init (+ rx rw) ry 1.0f 0.0f r g b a 1.0f rw rh 0.0f)
+                    v4 (Vertex.init (+ rx rw) (+ ry rh) 1.0f 1.0f r g b a 1.0f rw rh 0.0f)
+                    v5 (Vertex.init rx (+ ry rh) 0.0f 1.0f r g b a 1.0f rw rh 0.0f)]
+                (do
+                  (Array.push-back! &verts v0)
+                  (Array.push-back! &verts v1)
+                  (Array.push-back! &verts v2)
+                  (Array.push-back! &verts v3)
+                  (Array.push-back! &verts v4)
+                  (Array.push-back! &verts v5)))
+          ))
+        verts)))
+)
