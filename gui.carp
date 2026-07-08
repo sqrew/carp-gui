@@ -50,6 +50,8 @@
   scroll-knob-active Color4
   
   separator Color4
+  tooltip-bg Color4
+  tooltip-text Color4
 ])
 
 (defmodule Theme
@@ -88,6 +90,8 @@
       (Color4.init 0.55f 0.55f 0.6f 1.0f)      ;; scroll-knob-active
       
       (Color4.init 0.2f 0.2f 0.23f 1.0f)       ;; separator
+      (Color4.init 0.1f 0.1f 0.12f 0.95f)      ;; tooltip-bg
+      (Color4.init 0.9f 0.9f 0.9f 1.0f)        ;; tooltip-text
     ))
 )
 
@@ -157,11 +161,12 @@
   clip-rects (Array GuiRect)
   panel-stack (Array PanelState)
   theme Theme
+  last-widget-hovered Bool
 ])
 
 (defmodule Context
   (defn create []
-    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing) [] false [] [] (Theme.create-default)))
+    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing) [] false [] [] (Theme.create-default) false))
 
   (defn clear! [ctx]
     (do
@@ -170,7 +175,8 @@
       (Context.set-id-stack! ctx [])
       (Context.set-input-captured! ctx false)
       (Context.set-clip-rects! ctx [])
-      (Context.set-panel-stack! ctx [])))
+      (Context.set-panel-stack! ctx [])
+      (Context.set-last-widget-hovered! ctx false)))
 )
 
 (defmodule Gui
@@ -192,6 +198,8 @@
   (sig begin-child-panel (Fn [(Ref Context) (Ref String) Float Float Float] ()))
   (sig end-child-panel (Fn [(Ref Context)] (Maybe Float)))
   (sig separator (Fn [(Ref Context)] ()))
+  (sig tooltip (Fn [(Ref Context) String] ()))
+  (sig widget-hovered? (Fn [(Ref Context) (Ref GuiRect)] Bool))
   
   (sig push-id (Fn [(Ref Context) (Ref String)] ()))
   (sig pop-id (Fn [(Ref Context)] ()))
@@ -215,6 +223,13 @@
   ;; === INPUT CAPTURE ===
   (defn input-captured? [ctx]
     @(Context.input-captured ctx))
+
+  (defn widget-hovered? [ctx rect]
+    (let [mx @(Context.mouse-x ctx)
+          my @(Context.mouse-y ctx)
+          clip (get-active-clip-rect ctx)]
+      (and (GuiRect.contains? rect mx my)
+           (GuiRect.contains? &clip mx my))))
 
   ;; === ID HASH STACK ===
   (defn push-id [ctx id]
@@ -357,15 +372,16 @@
 
   (defn label [ctx text]
     (let [rect (get-next-widget-rect! ctx 18.0f)
+          hovered (widget-hovered? ctx &rect)
           color @(Theme.label-text (Context.theme ctx))]
-      (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text rect color text (get-active-clip-rect ctx)))))
+      (do
+        (Context.set-last-widget-hovered! ctx hovered)
+        (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text rect color text (get-active-clip-rect ctx))))))
 
   (defn button [ctx id label-text]
     (let [rect (get-next-widget-rect! ctx 24.0f)
           hashed-id (get-hashed-id ctx id)
-          mx @(Context.mouse-x ctx)
-          my @(Context.mouse-y ctx)
-          hovered (GuiRect.contains? &rect mx my)
+          hovered (widget-hovered? ctx &rect)
           clicked (and hovered @(Context.mouse-clicked ctx))
           
           ;; Style based on mouse hover/click state
@@ -376,6 +392,7 @@
                      @(Theme.button-bg (Context.theme ctx)))
           text-color @(Theme.button-text (Context.theme ctx))]
       (do
+        (Context.set-last-widget-hovered! ctx hovered)
         (when hovered
           (Context.set-hot-id! ctx @id))
         (when clicked
@@ -416,12 +433,12 @@
           mx @(Context.mouse-x ctx)
           my @(Context.mouse-y ctx)
           
-          ;; Slider interactivity checking full widget height on the track segment
-          interact-rect (GuiRect.init track-x y track-w h)
-          hovered (GuiRect.contains? &interact-rect mx my)
+          ;; Hover checks full widget bounds
+          hovered (widget-hovered? ctx &rect)
           act-id @(Context.active-id ctx)
           result (Maybe.Nothing)]
       (do
+        (Context.set-last-widget-hovered! ctx hovered)
         (when hovered
           (Context.set-hot-id! ctx @id))
         (when (and hovered @(Context.mouse-clicked ctx))
@@ -595,7 +612,8 @@
           h @(GuiRect.h &rect)
           
           num (Array.length tab-labels)
-          result (Maybe.Nothing)]
+          result (Maybe.Nothing)
+          widget-hov (widget-hovered? ctx &rect)]
       (if (= num 0)
         result
         (let [spacing 4.0f
@@ -603,10 +621,11 @@
               mx @(Context.mouse-x ctx)
               my @(Context.mouse-y ctx)]
           (do
+            (Context.set-last-widget-hovered! ctx widget-hov)
             (for [i 0 num]
               (let [tab-x (+ x (* (Float.from-int i) (+ tab-w spacing)))
                     tab-rect (GuiRect.init tab-x y tab-w h)
-                    hovered (GuiRect.contains? &tab-rect mx my)
+                    hovered (widget-hovered? ctx &tab-rect)
                     clicked (and hovered @(Context.mouse-clicked ctx))
                     selected (= current-selection i)
                     
@@ -649,9 +668,7 @@
           w @(GuiRect.w &rect)
           h @(GuiRect.h &rect)
           
-          mx @(Context.mouse-x ctx)
-          my @(Context.mouse-y ctx)
-          hovered (GuiRect.contains? &rect mx my)
+          hovered (widget-hovered? ctx &rect)
           clicked (and hovered @(Context.mouse-clicked ctx))
           
           ;; If clicked, toggle the open state
@@ -667,6 +684,7 @@
           arrow (if next-open @"- " @"+ ")
           full-title (str* arrow title)]
       (do
+        (Context.set-last-widget-hovered! ctx hovered)
         (when hovered
           (Context.set-hot-id! ctx @id))
         (when clicked
@@ -811,4 +829,25 @@
           line-rect (GuiRect.init x (+ y 4.0f) w 2.0f)
           line-color @(Theme.separator (Context.theme ctx))]
       (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect line-rect line-color 0.0f (get-active-clip-rect ctx)))))
+
+  (defn tooltip [ctx text]
+    (when @(Context.last-widget-hovered ctx)
+      (let [mx @(Context.mouse-x ctx)
+            my @(Context.mouse-y ctx)
+            
+            font-sz 12.0f
+            tw (text-width &text font-sz)
+            th font-sz
+            pad 4.0f
+            
+            tx (+ mx 12.0f)
+            ty (+ my 12.0f)
+            
+            bg-rect (GuiRect.init tx ty (+ tw (* pad 2.0f)) (+ th (* pad 2.0f)))
+            bg-color @(Theme.tooltip-bg (Context.theme ctx))
+            text-color @(Theme.tooltip-text (Context.theme ctx))
+            text-rect (GuiRect.init (+ tx pad) (+ ty pad) tw th)]
+        (do
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect bg-rect bg-color 2.0f (GuiRect.init 0.0f 0.0f 99999.0f 99999.0f)))
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color text (GuiRect.init 0.0f 0.0f 99999.0f 99999.0f)))))))
 )

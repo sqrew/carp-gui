@@ -193,3 +193,36 @@ This example shows how to configure a custom color theme (such as a Slate Dark t
       (Context.set-theme! &ctx theme)
       ctx)))
 ```
+
+## Example 6: Interactive Tooltips
+
+This example shows how to append tooltips to buttons, sliders, and other interactive widgets to display descriptive helper text when hovered.
+
+```carp
+(load "gui.carp")
+
+(defn tick-tooltip-gui [ctx mx my mouse-down mouse-clicked scale-ref]
+  (do
+    ;; 1. Begin UI frame
+    (Gui.begin ctx mx my mouse-down mouse-clicked)
+
+    ;; 2. Begin parent window panel
+    (Gui.begin-panel ctx @"settings" 10.0f 10.0f 250.0f 200.0f "Simulation Controls")
+      
+      ;; 3. Render button and check for tooltip
+      (if (Gui.button ctx &@"btn_reset" "Reset Engine")
+        (IO.println "Simulation reset!")
+        ())
+      (Gui.tooltip ctx "Re-initialize voxel mesh and simulation state.")
+      
+      (Gui.separator ctx)
+      
+      ;; 4. Render slider and check for tooltip
+      (match (Gui.slider ctx &@"scale_sld" @scale-ref 0.1f 10.0f "Voxel Scale")
+        (Maybe.Just new-val) (set! scale-ref new-val)
+        (Maybe.Nothing) ())
+      (Gui.tooltip ctx "Adjust resolution scale of individual voxels.")
+
+    (Gui.end-panel ctx)
+    (Gui.generate-vertices ctx)))
+```

@@ -194,4 +194,16 @@
                   (set! state (assert-true &state false "Separator command was not a Rect"))))
             (Gui.end-panel &ctx))))
 
+      ;; Test 12: Tooltip widget functionality
+      (do
+        (Gui.begin &ctx 50.0 50.0 true true)
+        (Gui.begin-panel &ctx @"tooltip_panel" 10.0f 10.0f 200.0f 100.0f @"Panel")
+        (let [clicked (Gui.button &ctx &@"my_btn" @"Click Me")]
+          (do
+            (set! state (assert-true &state @(Context.last-widget-hovered &ctx) "Button hover state is true"))
+            (Gui.tooltip &ctx @"My Button Tooltip")
+            (let [cmds (Context.draw-commands &ctx)]
+              (set! state (assert-true &state (= (Array.length cmds) 7) "Draw command list has 7 elements with tooltip")))))
+        (Gui.end-panel &ctx))
+
       state)))
