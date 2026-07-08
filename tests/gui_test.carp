@@ -65,7 +65,133 @@
             (let [verts (Gui.generate-vertices &ctx)
                   flat-verts (Gui.generate-vertices-flat &ctx)]
               (do
-                (set! state (assert-true &state (= (Array.length &verts) 24) "Generated 24 vertices (4 commands * 6 vertices per quad)"))
-                (set! state (assert-true &state (= (Array.length &flat-verts) 288) "Generated 288 flat floats (24 vertices * 12 floats per vertex)")))))))
+                (set! state (assert-true &state (= (Array.length &verts) 96) "Generated 96 vertices (2 quads + 14 visible characters * 6 vertices per character/quad)"))
+                (set! state (assert-true &state (= (Array.length &flat-verts) 1152) "Generated 1152 flat floats (96 vertices * 12 floats per vertex)")))))))
+
+      ;; Test 6: Tabs widget functionality
+      (do
+        (Gui.begin &ctx 50.0 50.0 true true) ;; Mouse at x=50, y=50, clicked
+        (Gui.begin-panel &ctx @"tabs_panel" 10.0f 10.0f 200.0f 100.0f @"Panel")
+        (let [labels [@"Tab A" @"Tab B"]
+              selected 1
+              res (Gui.tabs &ctx &@"my_tab_bar" &labels selected)]
+          (do
+            (match res
+              (Maybe.Just val) (set! state (assert-true &state (= val 0) "Correct tab index 0 clicked"))
+              (Maybe.Nothing) (set! state (assert-true &state false "Tabs did not return Just index")))
+            (let [cmds (Context.draw-commands &ctx)]
+              (set! state (assert-true &state (= (Array.length cmds) 7) "Draw command list has 7 elements for tabs")))))
+        (Gui.end-panel &ctx))
+
+      ;; Test 7: Collapsing header widget functionality
+      (do
+        (Gui.begin &ctx 50.0 50.0 true true) ;; Mouse at x=50, y=50, clicked
+        (Gui.begin-panel &ctx @"header_panel" 10.0f 10.0f 200.0f 100.0f @"Panel")
+        (let [new-open (Gui.collapsing-header &ctx &@"my_hdr" @"Header Title" false)]
+          (do
+            (set! state (assert-true &state new-open "Collapsing header toggled to true when clicked"))
+            (let [cmds (Context.draw-commands &ctx)]
+              (set! state (assert-true &state (= (Array.length cmds) 5) "Draw command list has 5 elements for collapsing header")))))
+        (Gui.end-panel &ctx))
+
+      ;; Test 8: Nested child panels functionality
+      (do
+        (Gui.begin &ctx 0.0 0.0 false false)
+        (Gui.begin-panel &ctx @"parent_panel" 10.0f 10.0f 200.0f 200.0f @"Parent")
+        
+        ;; Draw a child panel
+        (Gui.begin-child-panel &ctx &@"child_1" 150.0f 100.0f 0.0f)
+        ;; Active panel bounds should be child_1
+        (match @(Context.active-panel &ctx)
+          (Maybe.Just cstate)
+            (set! state (assert-true &state (Float.approx @(GuiRect.w (PanelState.bounds &cstate)) 150.0f) "Active child panel bounds width match"))
+          (Maybe.Nothing)
+            (set! state (assert-true &state false "Active child panel state found")))
+            
+        ;; Nest another child panel inside it!
+        (Gui.begin-child-panel &ctx &@"child_2" 100.0f 50.0f 0.0f)
+        (match @(Context.active-panel &ctx)
+          (Maybe.Just cstate2)
+            (set! state (assert-true &state (Float.approx @(GuiRect.w (PanelState.bounds &cstate2)) 100.0f) "Active nested child panel bounds width match"))
+          (Maybe.Nothing)
+            (set! state (assert-true &state false "Active nested child panel state found")))
+            
+        ;; End nested panel
+        (let [res2 (Gui.end-child-panel &ctx)]
+          (do
+            (set! state (assert-true &state (Maybe.nothing? &res2) "End nested child returned Nothing scroll"))
+            ;; Active panel should revert back to child_1
+            (match @(Context.active-panel &ctx)
+              (Maybe.Just cstate)
+                (set! state (assert-true &state (Float.approx @(GuiRect.w (PanelState.bounds &cstate)) 150.0f) "Active panel reverted to first child"))
+              (Maybe.Nothing)
+                (set! state (assert-true &state false "Active panel found after end-child-panel")))))
+                
+        ;; End first child panel
+        (let [res1 (Gui.end-child-panel &ctx)]
+          (set! state (assert-true &state (Maybe.nothing? &res1) "End first child returned Nothing scroll")))
+          
+        (Gui.end-panel &ctx))
+
+      ;; Test 9: Child panel scrolling and dragging interaction
+      (do
+        ;; Simulate mouse hovering over scrollbar knob
+        ;; Child panel bounds: rx = 18.0f, ry = 42.0f, rw = 150.0f, rh = 50.0f
+        ;; Scrollbar-w = 8.0f. So track-rect is:
+        ;; x = 18 + 150 - 8 = 160. y = 42. w = 8. h = 50.
+        ;; Let's place mouse at x=164.0f, y=45.0f, which is inside the track/knob.
+        (Gui.begin &ctx 164.0 45.0 true true) ;; Clicked at (164, 45)
+        (Gui.begin-panel &ctx @"parent" 10.0f 10.0f 200.0f 200.0f @"Parent")
+        
+        ;; Begin child panel with height = 50.0f, current scroll-y = 10.0f
+        (Gui.begin-child-panel &ctx &@"scroll_child" 150.0f 50.0f 10.0f)
+        
+        ;; Draw some widgets to exceed height of 50.0f
+        (let [r1 (Gui.get-next-widget-rect! &ctx 40.0f)
+              r2 (Gui.get-next-widget-rect! &ctx 40.0f)]
+          (do
+            ;; Check that scroll offset was applied to Y position of r1
+            (set! state (assert-true &state (Float.approx @(GuiRect.y &r1) 38.0f) "Scroll offset subtracted from widget Y"))))
+            
+        ;; End child panel and check scrollbar interaction
+        (let [res (Gui.end-child-panel &ctx)]
+          (do
+            (match res
+              (Maybe.Just new-scroll)
+                (set! state (assert-true &state (Float.approx new-scroll 0.0f) "Scrollbar drag updated scroll-y to 0.0"))
+              (Maybe.Nothing)
+                (set! state (assert-true &state false "Scrollbar drag did not return Just scroll-y")))))
+                
+        (Gui.end-panel &ctx))
+
+      ;; Test 10: Separator widget functionality
+      (do
+        (Gui.begin &ctx 0.0 0.0 false false)
+        (Gui.begin-panel &ctx @"sep_panel" 10.0f 10.0f 200.0f 100.0f @"Panel")
+        (Gui.separator &ctx)
+        (let [cmds (Context.draw-commands &ctx)]
+          (set! state (assert-true &state (= (Array.length cmds) 4) "Draw command list has 4 elements with separator")))
+        (Gui.end-panel &ctx))
+
+      ;; Test 11: Theme customization functionality
+      (do
+        (let [custom-theme (Theme.create-default)
+              red-color (Color4.init 1.0f 0.0f 0.0f 1.0f)]
+          (do
+            (Theme.set-separator! &custom-theme red-color)
+            (Context.set-theme! &ctx custom-theme)
+            (Gui.begin &ctx 0.0 0.0 false false)
+            (Gui.begin-panel &ctx @"theme_panel" 10.0f 10.0f 200.0f 100.0f @"Panel")
+            (Gui.separator &ctx)
+            (let [cmds (Context.draw-commands &ctx)
+                  cmd (Array.unsafe-nth cmds 3)]
+              (match-ref cmd
+                (GuiDrawCommand.Rect rect color radius c-rect)
+                  (do
+                    (set! state (assert-true &state (Float.approx @(Color4.r color) 1.0f) "Custom theme separator R color is 1.0"))
+                    (set! state (assert-true &state (Float.approx @(Color4.g color) 0.0f) "Custom theme separator G color is 0.0")))
+                _
+                  (set! state (assert-true &state false "Separator command was not a Rect"))))
+            (Gui.end-panel &ctx))))
 
       state)))
