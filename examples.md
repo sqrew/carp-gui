@@ -226,3 +226,28 @@ This example shows how to append tooltips to buttons, sliders, and other interac
     (Gui.end-panel ctx)
     (Gui.generate-vertices ctx)))
 ```
+
+## Example 7: Dropdown Selector (Combo Box)
+
+This example shows how to use the dropdown selector (`Gui.combo`) to let users select one option from a list of items.
+
+```carp
+(load "gui.carp")
+
+(defn tick-combo-gui [ctx mx my mouse-down mouse-clicked selected-idx-ref]
+  (do
+    ;; 1. Begin UI frame
+    (Gui.begin ctx mx my mouse-down mouse-clicked)
+
+    ;; 2. Begin parent window panel
+    (Gui.begin-panel ctx @"config" 10.0f 10.0f 250.0f 300.0f "Graphics Settings")
+      
+      (Gui.label ctx "Renderer Type:")
+      (let [options [@"Software" @"WebGPU (Vulkan)" @"WebGPU (Metal)" @"OpenGL"]]
+        (match (Gui.combo ctx &@"renderer_combo" &options @selected-idx-ref)
+          (Maybe.Just new-idx) (set! selected-idx-ref new-idx)
+          (Maybe.Nothing) ()))
+
+    (Gui.end-panel ctx)
+    (Gui.generate-vertices ctx)))
+```

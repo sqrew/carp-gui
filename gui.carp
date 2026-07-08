@@ -162,11 +162,12 @@
   panel-stack (Array PanelState)
   theme Theme
   last-widget-hovered Bool
+  active-combo-id String
 ])
 
 (defmodule Context
   (defn create []
-    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing) [] false [] [] (Theme.create-default) false))
+    (Context.init 0.0f 0.0f false false @"" @"" [] (Maybe.Nothing) [] false [] [] (Theme.create-default) false @""))
 
   (defn clear! [ctx]
     (do
@@ -198,8 +199,9 @@
   (sig begin-child-panel (Fn [(Ref Context) (Ref String) Float Float Float] ()))
   (sig end-child-panel (Fn [(Ref Context)] (Maybe Float)))
   (sig separator (Fn [(Ref Context)] ()))
-  (sig tooltip (Fn [(Ref Context) String] ()))
+  (sig tooltip (Fn [(Ref Context) (Ref String)] ()))
   (sig widget-hovered? (Fn [(Ref Context) (Ref GuiRect)] Bool))
+  (sig combo (Fn [(Ref Context) (Ref String) (Ref (Array String)) Int] (Maybe Int)))
   
   (sig push-id (Fn [(Ref Context) (Ref String)] ()))
   (sig pop-id (Fn [(Ref Context)] ()))
@@ -836,7 +838,7 @@
             my @(Context.mouse-y ctx)
             
             font-sz 12.0f
-            tw (text-width &text font-sz)
+            tw (text-width text font-sz)
             th font-sz
             pad 4.0f
             
@@ -849,5 +851,94 @@
             text-rect (GuiRect.init (+ tx pad) (+ ty pad) tw th)]
         (do
           (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect bg-rect bg-color 2.0f (GuiRect.init 0.0f 0.0f 99999.0f 99999.0f)))
-          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color text (GuiRect.init 0.0f 0.0f 99999.0f 99999.0f)))))))
+          (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color @text (GuiRect.init 0.0f 0.0f 99999.0f 99999.0f)))))))
+
+  (defn combo [ctx id items current-selection]
+    (let [rect (get-next-widget-rect! ctx 22.0f)
+          hashed-id (get-hashed-id ctx id)
+          
+          x @(GuiRect.x &rect)
+          y @(GuiRect.y &rect)
+          w @(GuiRect.w &rect)
+          h @(GuiRect.h &rect)
+          
+          num (Array.length items)
+          result (Maybe.Nothing)]
+      (if (= num 0)
+        result
+        (let [act-combo-id @(Context.active-combo-id ctx)
+              is-open (= &act-combo-id id)
+              hovered (widget-hovered? ctx &rect)
+              clicked (and hovered @(Context.mouse-clicked ctx))
+              
+              ;; Styling the header selector bar
+              bg-color (if hovered
+                         (if @(Context.mouse-down ctx)
+                           @(Theme.button-active (Context.theme ctx))
+                           @(Theme.button-hover (Context.theme ctx)))
+                         @(Theme.button-bg (Context.theme ctx)))
+              text-color @(Theme.button-text (Context.theme ctx))
+              
+              ;; Fetch current selected label
+              selected-label (if (and (>= current-selection 0) (< current-selection num))
+                               @(Array.unsafe-nth items current-selection)
+                               @"")
+                               
+              ;; Prepend visual indicator representing expansion status
+              arrow (if is-open @"v " @"> ")
+              full-title (str* arrow selected-label)]
+          (do
+            (Context.set-last-widget-hovered! ctx hovered)
+            (when hovered
+              (Context.set-hot-id! ctx @id))
+              
+            ;; Click header: toggle open/close
+            (when clicked
+              (if is-open
+                (Context.set-active-combo-id! ctx @"")
+                (Context.set-active-combo-id! ctx @id)))
+                
+            ;; Render header background
+            (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect @&rect bg-color 4.0f (get-active-clip-rect ctx)))
+            ;; Render header text
+            (let [text-rect (GuiRect.init (+ x 6.0f) (+ y 4.0f) (- w 12.0f) 14.0f)]
+              (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text text-rect text-color full-title (get-active-clip-rect ctx))))
+              
+            ;; If open, draw options as vertical list
+            (when is-open
+              (for [i 0 num]
+                (let [opt-rect (get-next-widget-rect! ctx 20.0f)
+                      opt-x @(GuiRect.x &opt-rect)
+                      opt-y @(GuiRect.y &opt-rect)
+                      opt-w @(GuiRect.w &opt-rect)
+                      opt-h @(GuiRect.h &opt-rect)
+                      
+                      opt-hovered (widget-hovered? ctx &opt-rect)
+                      opt-clicked (and opt-hovered @(Context.mouse-clicked ctx))
+                      opt-selected (= current-selection i)
+                      
+                      ;; Style options (use tab colors)
+                      opt-bg (if opt-selected
+                               @(Theme.tab-selected (Context.theme ctx))
+                               (if opt-hovered
+                                 @(Theme.tab-hover (Context.theme ctx))
+                                 @(Theme.tab-bg (Context.theme ctx))))
+                      opt-text-color (if opt-selected
+                                       @(Theme.tab-text-selected (Context.theme ctx))
+                                       @(Theme.tab-text (Context.theme ctx)))
+                      label (Array.unsafe-nth items i)]
+                  (do
+                    (when opt-hovered
+                      (Context.set-hot-id! ctx @id))
+                    (when opt-clicked
+                      (do
+                        (Context.set-active-combo-id! ctx @"")
+                        (set! result (Maybe.Just i))))
+                        
+                    ;; Draw option rect (radius 2.0)
+                    (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Rect opt-rect opt-bg 2.0f (get-active-clip-rect ctx)))
+                    ;; Draw option text (inset slightly for child indentation look)
+                    (let [opt-text-rect (GuiRect.init (+ opt-x 12.0f) (+ opt-y 4.0f) (- opt-w 24.0f) 12.0f)]
+                      (Array.push-back! (Context.draw-commands ctx) (GuiDrawCommand.Text opt-text-rect opt-text-color @label (get-active-clip-rect ctx))))))))
+            result)))))
 )

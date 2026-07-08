@@ -201,9 +201,38 @@
         (let [clicked (Gui.button &ctx &@"my_btn" @"Click Me")]
           (do
             (set! state (assert-true &state @(Context.last-widget-hovered &ctx) "Button hover state is true"))
-            (Gui.tooltip &ctx @"My Button Tooltip")
+            (Gui.tooltip &ctx "My Button Tooltip")
             (let [cmds (Context.draw-commands &ctx)]
               (set! state (assert-true &state (= (Array.length cmds) 7) "Draw command list has 7 elements with tooltip")))))
+        (Gui.end-panel &ctx))
+
+      ;; Test 13: Combo / Dropdown widget functionality
+      (do
+        ;; Frame 1: Combo is closed, click header to open it
+        (Gui.begin &ctx 50.0 50.0 true true)
+        (Gui.begin-panel &ctx @"combo_panel" 10.0f 10.0f 200.0f 200.0f @"Panel")
+        (let [items [@"Opt A" @"Opt B"]
+              res (Gui.combo &ctx &@"my_combo" &items 0)]
+          (do
+            (set! state (assert-true &state (Maybe.nothing? &res) "Combo click returns Nothing on first click frame"))
+            (set! state (assert-true &state (= @(Context.active-combo-id &ctx) @"my_combo") "Combo active-combo-id set to my_combo"))
+            (let [cmds (Context.draw-commands &ctx)]
+              (set! state (assert-true &state (= (Array.length cmds) 5) "Draw command list has 5 elements when closed")))))
+        (Gui.end-panel &ctx)
+
+        ;; Frame 2: Combo is open, click second option (Opt B) at y=110
+        (Gui.begin &ctx 50.0 110.0 true true)
+        (Context.set-active-combo-id! &ctx @"my_combo")
+        (Gui.begin-panel &ctx @"combo_panel" 10.0f 10.0f 200.0f 200.0f @"Panel")
+        (let [items [@"Opt A" @"Opt B"]
+              res (Gui.combo &ctx &@"my_combo" &items 0)]
+          (do
+            (match res
+              (Maybe.Just idx) (set! state (assert-true &state (= idx 1) "Combo selected index is 1 (Opt B)"))
+              (Maybe.Nothing) (set! state (assert-true &state false "Combo selection returned Nothing")))
+            (set! state (assert-true &state (= @(Context.active-combo-id &ctx) @"") "Combo closed (active-combo-id cleared)"))
+            (let [cmds (Context.draw-commands &ctx)]
+              (set! state (assert-true &state (= (Array.length cmds) 9) "Draw command list has 9 elements when open")))))
         (Gui.end-panel &ctx))
 
       state)))
